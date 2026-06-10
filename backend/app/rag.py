@@ -2,27 +2,29 @@ import fitz  # PyMuPDF
 import chromadb
 from chromadb.utils import embedding_functions
 import ollama
-from typing import List, Dict
+from typing import List, Dict, Optional
 import os
 
 class RAGManager:
-    def __init__(self, collection_name: str = "book_collection"):
-        # Use absolute path for DB to avoid confusion
+    def __init__(self):
+        # Use absolute path for DB
         db_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "chroma_db")
         self.client = chromadb.PersistentClient(path=db_path)
         
         # Default embedding function (sentence-transformers/all-MiniLM-L6-v2)
         self.embedding_function = embedding_functions.DefaultEmbeddingFunction()
-        
-        self.collection = self.client.get_or_create_collection(
-            name=collection_name,
+
+    def get_collection(self, notebook_id: str):
+        """Get or create a collection for a specific notebook."""
+        return self.client.get_or_create_collection(
+            name=f"notebook_{notebook_id}",
             embedding_function=self.embedding_function
         )
-        self.model = "llama3.2:1b"
 
-    def is_indexed(self, doc_id: str) -> bool:
-        """Check if a document is already in the vector database."""
-        results = self.collection.get(where={"source": doc_id}, limit=1)
+    def is_indexed(self, notebook_id: str, doc_id: str) -> bool:
+        """Check if a document is already in the notebook's vector database."""
+        collection = self.get_collection(notebook_id)
+        results = collection.get(where={"source": doc_id}, limit=1)
         return results and len(results['ids']) > 0
 
     def extract_text_from_pdf(self, file_path: str) -> str:
@@ -36,56 +38,94 @@ class RAGManager:
         with open(file_path, 'r', encoding='utf-8') as f:
             return f.read()
 
-    def chunk_text(self, text: str, chunk_size: int = 500, chunk_overlap: int = 50) -> List[str]:
+    def chunk_text(self, text: str, chunk_size: int = 600, chunk_overlap: int = 100) -> List[str]:
+        """Split text into chunks with overlap for better context."""
         chunks = []
         if not text: return []
-        for i in range(0, len(text), chunk_size - chunk_overlap):
-            chunks.append(text[i:i + chunk_size])
+        # Simple character-based chunking (can be improved to word-based)
+        start = 0
+        while start < len(text):
+            end = start + chunk_size
+            chunks.append(text[start:end])
+            start += chunk_size - chunk_overlap
         return chunks
 
-    def add_to_vector_db(self, chunks: List[str], doc_id: str):
+    def add_to_vector_db(self, notebook_id: str, chunks: List[str], doc_id: str):
         if not chunks: return
+        collection = self.get_collection(notebook_id)
         ids = [f"{doc_id}_{i}" for i in range(len(chunks))]
         metadatas = [{"source": doc_id} for _ in range(len(chunks))]
-        self.collection.add(
+        collection.add(
             documents=chunks,
             ids=ids,
             metadatas=metadatas
         )
 
-    def query(self, question: str, n_results: int = 2) -> Dict:
-        # Check if collection is empty
-        if self.collection.count() == 0:
-            return {"answer": "No documents uploaded yet. Please upload a PDF or Markdown file first.", "sources": []}
+    def delete_document(self, notebook_id: str, doc_id: str):
+        """Remove a document's vectors from the collection."""
+        collection = self.get_collection(notebook_id)
+        collection.delete(where={"source": doc_id})
 
-        results = self.collection.query(
+    def delete_notebook_collection(self, notebook_id: str):
+        """Delete the entire collection for a notebook."""
+        try:
+            self.client.delete_collection(name=f"notebook_{notebook_id}")
+        except:
+            pass # Collection might not exist
+
+    def query(self, notebook_id: str, question: str, model: str = "llama3.2:1b", n_results: int = 5) -> Dict:
+        collection = self.get_collection(notebook_id)
+        
+        # Check if collection is empty
+        if collection.count() == 0:
+            return {"answer": "Este notebook ainda não possui referências. Por favor, faça upload de um arquivo PDF ou Markdown.", "sources": []}
+
+        # Retrieve relevant chunks
+        results = collection.query(
             query_texts=[question],
             n_results=n_results
         )
         
         if not results['documents'] or not results['documents'][0]:
-            return {"answer": "I couldn't find any relevant information in the uploaded documents.", "sources": []}
+            return {"answer": "Não encontrei informações relevantes nos documentos deste notebook para responder sua pergunta.", "sources": []}
 
-        context = "\n".join(results['documents'][0])
+        context = "\n\n---\n\n".join(results['documents'][0])
         sources = list(set([m['source'] for m in results['metadatas'][0]]))
         
-        prompt = f"""You are a helpful study assistant. Use the following pieces of retrieved context to answer the question. 
-        If you don't know the answer, just say that you don't know, don't try to make up an answer.
-        Keep the answer concise.
+        # Refined prompt to reduce hallucinations
+        prompt = f"""Você é um assistente de estudos rigoroso e prestativo. Seu objetivo é responder perguntas baseando-se EXCLUSIVAMENTE no contexto fornecido abaixo.
 
-        Context:
-        {context}
+REGRAS CRÍTICAS:
+1. Se a resposta não estiver contida no contexto fornecido, diga explicitamente: "Sinto muito, mas não encontrei informações sobre isso nos documentos deste notebook."
+2. NÃO utilize conhecimentos externos ou invente fatos.
+3. Mantenha a resposta concisa e direta ao ponto.
+4. Se houver informações conflitantes, mencione o que cada fonte diz.
+
+CONTEXTO RECUPERADO:
+{context}
+
+PERGUNTA DO USUÁRIO: {question}
+
+RESPOSTA:"""
         
-        Question: {question}
-        
-        Answer:"""
-        
-        # Use ollama directly
-        response = ollama.generate(model=self.model, prompt=prompt)
-        
-        return {
-            "answer": response['response'],
-            "sources": sources
-        }
+        try:
+            # Use ollama with low temperature for more factual answers
+            response = ollama.generate(
+                model=model, 
+                prompt=prompt,
+                options={
+                    "temperature": 0.2, # Lower temperature = less creative, more factual
+                }
+            )
+            
+            return {
+                "answer": response['response'],
+                "sources": sources
+            }
+        except Exception as e:
+            return {
+                "answer": f"Erro ao consultar o modelo {model}: {str(e)}",
+                "sources": []
+            }
 
 rag_manager = RAGManager()

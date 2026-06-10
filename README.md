@@ -8,12 +8,12 @@ This project is a personal study initiative focused on implementing the entire R
 
 ## ✨ Features
 
-- **Document Ingestion**: Support for PDF and Markdown files.
-- **Smart Chunking**: Automatic text extraction and segmenting with configurable overlap for context retention.
-- **Vector Storage**: Persistent semantic indexing using **ChromaDB**.
-- **Local AI Generation**: Powered by **Ollama** using the `llama3.2:1b` model for privacy and performance.
-- **Interactive Chat**: A clean, minimalist interface for querying documents with source citation.
-- **Contextual History**: Maintains recent conversation history to provide coherent multi-turn interactions.
+- **Multi-Notebook Support**: Isolate study contexts into dedicated notebooks (e.g., "Quantum Computing", "Exam Prep").
+- **Robust Metadata Management**: Track notebook titles, creation dates, and preferred AI models via a persistent JSON registry.
+- **Reference Management**: Upload and delete specific PDF or Markdown files per notebook.
+- **Local AI Selection**: Choose between available Ollama models (Llama 3.2, Qwen, Mistral) dynamically.
+- **Hallucination Mitigation**: Refined RAG prompts with strict grounding rules and increased context retrieval (k=5).
+- **Persistent Vector Storage**: Each notebook has its own dedicated collection in **ChromaDB**.
 
 ---
 
@@ -29,9 +29,9 @@ This project is a personal study initiative focused on implementing the entire R
 ### Backend
 - **Framework**: [FastAPI](https://fastapi.tiangolo.com/)
 - **Vector Database**: [ChromaDB](https://www.trychroma.com/)
-- **LLM Engine**: [Ollama](https://ollama.com/) (running `llama3.2:1b`)
-- **Document Processing**: [PyMuPDF](https://pymupdf.readthedocs.io/) (fitz)
-- **Language**: Python 3.10+
+- **LLM Engine**: [Ollama](https://ollama.com/)
+- **Document Processing**: [PyMuPDF](https://pymupdf.readthedocs.io/)
+- **Metadata**: JSON-based persistent registry.
 
 ---
 
@@ -45,9 +45,10 @@ This project is a personal study initiative focused on implementing the entire R
 
 ### 1. Setup Ollama
 
-Pull the required model:
+Pull the models you wish to use:
 ```bash
 ollama pull llama3.2:1b
+ollama pull llama3.2:3b
 ```
 
 ### 2. Backend Installation
@@ -70,8 +71,6 @@ ollama pull llama3.2:1b
    python -m uvicorn app.main:app --reload
    ```
 
-The API will be available at `http://localhost:8000`.
-
 ### 3. Frontend Installation
 
 1. Navigate to the frontend directory:
@@ -87,17 +86,6 @@ The API will be available at `http://localhost:8000`.
    npm run dev
    ```
 
-Open `http://localhost:5173` in your browser.
-
----
-
-## 📖 Development Philosophy
-
-- **Educational First**: Prioritize understanding internal mechanics (chunking, embeddings, similarity) over convenience libraries.
-- **MVP Focus**: Deliver a working RAG pipeline quickly with a polished UI.
-- **Simplicity**: Maintain a clean architecture with minimal abstractions.
-- **Privacy**: All processing and AI generation happens locally on your machine.
-
 ---
 
 ## 🗺️ Project Structure
@@ -106,15 +94,17 @@ Open `http://localhost:5173` in your browser.
 .
 ├── backend/
 │   ├── app/                # FastAPI application logic
-│   │   ├── main.py         # API endpoints and server setup
-│   │   └── rag.py          # Core RAG logic (ChromaDB + Ollama)
-│   ├── chroma_db/          # Persistent vector database storage
-│   ├── uploads/            # Temporary storage for uploaded documents
+│   │   ├── main.py         # API endpoints
+│   │   ├── rag.py          # Core RAG logic (ChromaDB + Ollama)
+│   │   └── metadata.py     # Notebook registry management
+│   ├── chroma_db/          # Persistent vector storage
+│   ├── uploads/            # Documents organized by {notebook_id}/
+│   ├── notebooks_metadata.json # Global notebook registry
 │   └── requirements.txt    # Python dependencies
 └── frontend/
     ├── src/
-    │   ├── App.tsx         # Main application component
-    │   └── assets/         # Static assets and styles
+    │   ├── App.tsx         # Notebook-aware UI
+    │   └── assets/         # Static assets
     └── package.json        # Frontend dependencies
 ```
 

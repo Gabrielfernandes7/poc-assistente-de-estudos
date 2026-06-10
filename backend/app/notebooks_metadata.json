@@ -1,0 +1,10 @@
+{
+    "notebooks": [
+        {
+            "id": "82085db5-6fda-4b69-ae4b-aa093c2a9130",
+            "name": "UFC trabalho",
+            "created_at": "2026-06-10T13:14:09.683464",
+            "last_model": "llama3.2:1b"
+        }
+    ]
+}
