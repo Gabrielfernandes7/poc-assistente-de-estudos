@@ -78,7 +78,7 @@ class MetadataManager:
                 break
         self.save_all(notebooks)
 
-    def add_history_message(self, notebook_id: str, role: str, content: str, sources: List[str] = None):
+    def add_history_message(self, notebook_id: str, role: str, content: str, sources: List[str] = None, model: str = None):
         notebooks = self.load_all()
         for n in notebooks:
             if n["id"] == notebook_id:
@@ -86,7 +86,8 @@ class MetadataManager:
                 n["history"].append({
                     "role": role,
                     "content": content,
-                    "sources": sources or []
+                    "sources": sources or [],
+                    "model": model
                 })
                 # Limit history size to 30 messages
                 n["history"] = n["history"][-30:]

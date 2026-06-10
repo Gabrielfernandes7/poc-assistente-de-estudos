@@ -7,6 +7,13 @@ import os
 import re
 import uuid
 import logging
+import pytesseract
+from PIL import Image
+import io
+from dotenv import load_dotenv
+
+# Carrega variáveis de ambiente (.env)
+load_dotenv()
 
 # Configuração de logging
 logging.basicConfig(level=logging.INFO)
@@ -14,12 +21,20 @@ logger = logging.getLogger(__name__)
 
 class RAGManager:
     def __init__(self):
-        # Use absolute path for DB
-        db_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "chroma_db")
-        # Initialize PersistentClient
-        self.client = chromadb.PersistentClient(path=db_path)
+        # Configuração de Persistência (Modo Local vs Modo Servidor)
+        # Se as variáveis de ambiente estiverem presentes, conecta ao servidor remoto (ex: produção)
+        # Caso contrário, usa o banco local persistente.
+        host = os.getenv("CHROMA_HOST")
+        port = os.getenv("CHROMA_PORT")
         
-        # Default embedding function (sentence-transformers/all-MiniLM-L6-v2 por padrão no Chroma)
+        if host and port:
+            logger.info(f"Conectando ao servidor ChromaDB em {host}:{port}")
+            self.client = chromadb.HttpClient(host=host, port=port)
+        else:
+            db_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "chroma_db")
+            logger.info(f"Usando ChromaDB Local em {db_path}")
+            self.client = chromadb.PersistentClient(path=db_path)
+        
         self.embedding_function = embedding_functions.DefaultEmbeddingFunction()
 
     def get_collection(self, notebook_id: str):
@@ -41,14 +56,22 @@ class RAGManager:
             return False
 
     def extract_text_from_pdf(self, file_path: str) -> List[Dict]:
-        """Extrai texto e metadados (página) do PDF."""
+        """Extrai texto e metadados (página) do PDF, com fallback para OCR."""
         pages_content = []
         try:
             with fitz.open(file_path) as doc:
                 for page_num, page in enumerate(doc):
-                    text = page.get_text("text")
-                    if text.strip():
-                        # Limpeza básica mantendo estrutura
+                    text = page.get_text("text").strip()
+                    
+                    # Heurística de OCR: Se a página tem pouquíssimo texto, pode ser um scan
+                    # Documentos jurídicos costumam ter ao menos 50 caracteres por página
+                    if len(text) < 50:
+                        logger.info(f"Página {page_num + 1} parece ser uma imagem. Iniciando OCR...")
+                        ocr_text = self._run_ocr_on_page(page)
+                        if ocr_text:
+                            text = ocr_text
+                    
+                    if text:
                         text = re.sub(r'\s+', ' ', text).strip()
                         pages_content.append({
                             "text": text,
@@ -58,6 +81,22 @@ class RAGManager:
         except Exception as e:
             logger.error(f"Error extracting PDF {file_path}: {e}")
             return []
+
+    def _run_ocr_on_page(self, page) -> str:
+        """Converte a página do PDF em imagem e executa o Tesseract."""
+        try:
+            # Renderiza a página como imagem (pixmap)
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2)) # Aumenta a resolução para 2x (melhora OCR)
+            img_data = pix.tobytes("png")
+            img = Image.open(io.BytesIO(img_data))
+            
+            # Executa OCR (configurado para Português e Inglês)
+            # Nota: Requer tesseract-ocr instalado no sistema (sudo apt install tesseract-ocr)
+            text = pytesseract.image_to_string(img, lang='por+eng')
+            return text.strip()
+        except Exception as e:
+            logger.error(f"Falha no OCR da página: {e}")
+            return ""
 
     def extract_text_from_md(self, file_path: str) -> List[Dict]:
         """Extrai texto de Markdown."""
@@ -192,7 +231,5 @@ RESPOSTA (Em Português):"""
                 "answer": f"Erro técnico: {str(e)}",
                 "sources": []
             }
-
-rag_manager = RAGManager()
 
 rag_manager = RAGManager()

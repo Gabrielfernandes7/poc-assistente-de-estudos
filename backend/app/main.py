@@ -182,7 +182,8 @@ async def query_document(request: QueryRequest):
             request.notebook_id, 
             "assistant", 
             result["answer"], 
-            result["sources"]
+            result["sources"],
+            model=request.model
         )
         
         return result

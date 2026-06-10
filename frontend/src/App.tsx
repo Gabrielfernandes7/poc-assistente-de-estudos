@@ -17,6 +17,7 @@ interface Message {
   role: 'user' | 'assistant';
   content: string;
   sources?: string[];
+  model?: string;
 }
 
 const API_BASE_URL = 'http://localhost:8000';
@@ -220,7 +221,8 @@ function App() {
       const assistantMsg: Message = {
         role: 'assistant',
         content: response.data.answer,
-        sources: response.data.sources
+        sources: response.data.sources,
+        model: selectedModel
       };
       
       setMessages(prev => [...prev, assistantMsg]);
@@ -228,7 +230,11 @@ function App() {
       // Update notebook history in global state
       setNotebooks(prev => prev.map(n => {
         if (n.id === activeNotebook.id) {
-          const newHistory = [...(n.history || []), { role: 'user', content: userMsg } as Message, assistantMsg];
+          const newHistory = [
+            ...(n.history || []), 
+            { role: 'user', content: userMsg } as Message, 
+            assistantMsg
+          ];
           return { ...n, history: newHistory };
         }
         return n;
@@ -356,11 +362,17 @@ function App() {
 
               {messages.map((msg, idx) => (
                 <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                  <div className={`max-w-[85%] rounded-2xl px-6 py-4 shadow-sm leading-relaxed ${
+                  <div className={`max-w-[85%] rounded-2xl px-6 py-4 shadow-sm leading-relaxed relative ${
                     msg.role === 'user' 
                     ? 'bg-blue-600 text-white font-medium' 
                     : isDarkMode ? 'bg-slate-800 border border-slate-700' : 'bg-white border border-slate-200'
                   }`}>
+                    {msg.role === 'assistant' && msg.model && (
+                      <div className="flex items-center gap-1.5 mb-2 opacity-50">
+                        <BrainCircuit size={10} />
+                        <span className="text-[9px] font-black uppercase tracking-widest">{msg.model}</span>
+                      </div>
+                    )}
                     <div className="whitespace-pre-wrap">{msg.content}</div>
                     {msg.sources && msg.sources.length > 0 && (
                       <div className={`mt-4 pt-3 border-t flex flex-wrap gap-2 ${isDarkMode ? 'border-slate-700' : 'border-slate-100'}`}>

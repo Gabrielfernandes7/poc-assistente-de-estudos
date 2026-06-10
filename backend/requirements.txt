@@ -5,3 +5,6 @@ pymupdf
 chromadb
 ollama
 pydantic
+pytesseract
+Pillow
+python-dotenv
