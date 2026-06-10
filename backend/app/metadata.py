@@ -33,11 +33,26 @@ class MetadataManager:
             "id": str(uuid.uuid4()),
             "name": name,
             "created_at": datetime.now().isoformat(),
-            "last_model": "llama3.2:1b"
+            "last_model": "llama3.2:1b",
+            "history": [],
+            "files_status": {} # Track status of each file: "processing", "ready", "error"
         }
         notebooks.append(new_notebook)
         self.save_all(notebooks)
         return new_notebook
+
+    def update_file_status(self, notebook_id: str, filename: str, status: str):
+        notebooks = self.load_all()
+        for n in notebooks:
+            if n["id"] == notebook_id:
+                if "files_status" not in n: n["files_status"] = {}
+                n["files_status"][filename] = status
+                break
+        self.save_all(notebooks)
+
+    def get_files_status(self, notebook_id: str) -> Dict[str, str]:
+        n = self.get_notebook(notebook_id)
+        return n.get("files_status", {}) if n else {}
 
     def delete_notebook(self, notebook_id: str) -> bool:
         notebooks = self.load_all()
@@ -60,6 +75,29 @@ class MetadataManager:
         for n in notebooks:
             if n["id"] == notebook_id:
                 n["last_model"] = model
+                break
+        self.save_all(notebooks)
+
+    def add_history_message(self, notebook_id: str, role: str, content: str, sources: List[str] = None):
+        notebooks = self.load_all()
+        for n in notebooks:
+            if n["id"] == notebook_id:
+                if "history" not in n: n["history"] = []
+                n["history"].append({
+                    "role": role,
+                    "content": content,
+                    "sources": sources or []
+                })
+                # Limit history size to 30 messages
+                n["history"] = n["history"][-30:]
+                break
+        self.save_all(notebooks)
+
+    def clear_history(self, notebook_id: str):
+        notebooks = self.load_all()
+        for n in notebooks:
+            if n["id"] == notebook_id:
+                n["history"] = []
                 break
         self.save_all(notebooks)
 

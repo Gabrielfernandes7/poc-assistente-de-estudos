@@ -4,128 +4,195 @@ from chromadb.utils import embedding_functions
 import ollama
 from typing import List, Dict, Optional
 import os
+import re
+import uuid
+import logging
+
+# Configuração de logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class RAGManager:
     def __init__(self):
         # Use absolute path for DB
         db_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "chroma_db")
+        # Initialize PersistentClient
         self.client = chromadb.PersistentClient(path=db_path)
         
-        # Default embedding function (sentence-transformers/all-MiniLM-L6-v2)
+        # Default embedding function (sentence-transformers/all-MiniLM-L6-v2 por padrão no Chroma)
         self.embedding_function = embedding_functions.DefaultEmbeddingFunction()
 
     def get_collection(self, notebook_id: str):
         """Get or create a collection for a specific notebook."""
+        clean_id = notebook_id.replace("-", "")
         return self.client.get_or_create_collection(
-            name=f"notebook_{notebook_id}",
+            name=f"nb_{clean_id}",
             embedding_function=self.embedding_function
         )
 
     def is_indexed(self, notebook_id: str, doc_id: str) -> bool:
         """Check if a document is already in the notebook's vector database."""
-        collection = self.get_collection(notebook_id)
-        results = collection.get(where={"source": doc_id}, limit=1)
-        return results and len(results['ids']) > 0
+        try:
+            collection = self.get_collection(notebook_id)
+            results = collection.get(where={"source": doc_id}, limit=1)
+            return results and len(results['ids']) > 0
+        except Exception as e:
+            logger.error(f"Error checking index for {doc_id}: {e}")
+            return False
 
-    def extract_text_from_pdf(self, file_path: str) -> str:
-        text = ""
-        with fitz.open(file_path) as doc:
-            for page in doc:
-                text += page.get_text()
-        return text
+    def extract_text_from_pdf(self, file_path: str) -> List[Dict]:
+        """Extrai texto e metadados (página) do PDF."""
+        pages_content = []
+        try:
+            with fitz.open(file_path) as doc:
+                for page_num, page in enumerate(doc):
+                    text = page.get_text("text")
+                    if text.strip():
+                        # Limpeza básica mantendo estrutura
+                        text = re.sub(r'\s+', ' ', text).strip()
+                        pages_content.append({
+                            "text": text,
+                            "page": page_num + 1
+                        })
+            return pages_content
+        except Exception as e:
+            logger.error(f"Error extracting PDF {file_path}: {e}")
+            return []
 
-    def extract_text_from_md(self, file_path: str) -> str:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            return f.read()
+    def extract_text_from_md(self, file_path: str) -> List[Dict]:
+        """Extrai texto de Markdown."""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                return [{"text": f.read(), "page": 1}]
+        except Exception as e:
+            logger.error(f"Error reading MD {file_path}: {e}")
+            return []
 
-    def chunk_text(self, text: str, chunk_size: int = 600, chunk_overlap: int = 100) -> List[str]:
-        """Split text into chunks with overlap for better context."""
+    def chunk_content(self, pages_content: List[Dict], chunk_size: int = 1000, overlap: int = 200) -> List[Dict]:
+        """
+        Divide o conteúdo em chunks mantendo metadados de origem.
+        Implementação inspirada em RecursiveCharacterTextSplitter.
+        """
         chunks = []
-        if not text: return []
-        # Simple character-based chunking (can be improved to word-based)
-        start = 0
-        while start < len(text):
-            end = start + chunk_size
-            chunks.append(text[start:end])
-            start += chunk_size - chunk_overlap
+        for item in pages_content:
+            text = item["text"]
+            page = item["page"]
+            
+            if len(text) <= chunk_size:
+                chunks.append({"text": text, "page": page})
+                continue
+            
+            start = 0
+            while start < len(text):
+                end = start + chunk_size
+                chunk_text = text[start:end]
+                chunks.append({"text": chunk_text, "page": page})
+                start += chunk_size - overlap
+                if end >= len(text):
+                    break
+                    
         return chunks
 
-    def add_to_vector_db(self, notebook_id: str, chunks: List[str], doc_id: str):
-        if not chunks: return
-        collection = self.get_collection(notebook_id)
-        ids = [f"{doc_id}_{i}" for i in range(len(chunks))]
-        metadatas = [{"source": doc_id} for _ in range(len(chunks))]
-        collection.add(
-            documents=chunks,
-            ids=ids,
-            metadatas=metadatas
-        )
+    def add_to_vector_db(self, notebook_id: str, chunks: List[Dict], doc_id: str):
+        if not chunks:
+            return
+        try:
+            collection = self.get_collection(notebook_id)
+            
+            documents = [c["text"] for c in chunks]
+            metadatas = [{"source": doc_id, "page": c["page"]} for c in chunks]
+            ids = [f"{doc_id}_{i}_{uuid.uuid4().hex[:6]}" for i in range(len(chunks))]
+            
+            collection.add(
+                documents=documents,
+                metadatas=metadatas,
+                ids=ids
+            )
+            logger.info(f"SUCCESS: Indexed {len(chunks)} chunks for {doc_id}.")
+        except Exception as e:
+            logger.error(f"CRITICAL ERROR adding to vector DB: {e}")
+            raise e
 
     def delete_document(self, notebook_id: str, doc_id: str):
-        """Remove a document's vectors from the collection."""
-        collection = self.get_collection(notebook_id)
-        collection.delete(where={"source": doc_id})
+        try:
+            collection = self.get_collection(notebook_id)
+            collection.delete(where={"source": doc_id})
+        except Exception as e:
+            logger.error(f"Error deleting document {doc_id}: {e}")
 
     def delete_notebook_collection(self, notebook_id: str):
-        """Delete the entire collection for a notebook."""
+        clean_id = notebook_id.replace("-", "")
         try:
-            self.client.delete_collection(name=f"notebook_{notebook_id}")
-        except:
-            pass # Collection might not exist
+            self.client.delete_collection(name=f"nb_{clean_id}")
+        except Exception as e:
+            logger.debug(f"Collection not found for deletion: {e}")
 
     def query(self, notebook_id: str, question: str, model: str = "llama3.2:1b", n_results: int = 5) -> Dict:
-        collection = self.get_collection(notebook_id)
-        
-        # Check if collection is empty
-        if collection.count() == 0:
-            return {"answer": "Este notebook ainda não possui referências. Por favor, faça upload de um arquivo PDF ou Markdown.", "sources": []}
+        try:
+            collection = self.get_collection(notebook_id)
+            
+            count = collection.count()
+            if count == 0:
+                return {
+                    "answer": "Este notebook parece não ter documentos indexados no momento. Por favor, faça o upload de uma referência.", 
+                    "sources": []
+                }
 
-        # Retrieve relevant chunks
-        results = collection.query(
-            query_texts=[question],
-            n_results=n_results
-        )
-        
-        if not results['documents'] or not results['documents'][0]:
-            return {"answer": "Não encontrei informações relevantes nos documentos deste notebook para responder sua pergunta.", "sources": []}
+            # Busca semântica
+            results = collection.query(
+                query_texts=[question],
+                n_results=min(n_results, count)
+            )
+            
+            if not results['documents'] or not results['documents'][0]:
+                return {
+                    "answer": "Não encontrei informações relevantes nos documentos para responder sua pergunta.", 
+                    "sources": []
+                }
 
-        context = "\n\n---\n\n".join(results['documents'][0])
-        sources = list(set([m['source'] for m in results['metadatas'][0]]))
-        
-        # Refined prompt to reduce hallucinations
-        prompt = f"""Você é um assistente de estudos rigoroso e prestativo. Seu objetivo é responder perguntas baseando-se EXCLUSIVAMENTE no contexto fornecido abaixo.
+            context_parts = []
+            sources_with_pages = []
+            
+            for doc, meta in zip(results['documents'][0], results['metadatas'][0]):
+                source_info = f"{meta['source']} (pág. {meta['page']})"
+                sources_with_pages.append(source_info)
+                context_parts.append(f"--- TRECHO DE {source_info} ---\n{doc}")
+            
+            context = "\n\n".join(context_parts)
+            
+            prompt = f"""Você é um Assistente Jurídico e de Estudos altamente preciso.
+Sua tarefa é responder à pergunta baseando-se EXCLUSIVAMENTE no contexto fornecido.
 
 REGRAS CRÍTICAS:
-1. Se a resposta não estiver contida no contexto fornecido, diga explicitamente: "Sinto muito, mas não encontrei informações sobre isso nos documentos deste notebook."
-2. NÃO utilize conhecimentos externos ou invente fatos.
-3. Mantenha a resposta concisa e direta ao ponto.
-4. Se houver informações conflitantes, mencione o que cada fonte diz.
+1. Cite sempre o nome do arquivo e a página ao usar uma informação (ex: [Nome do Arquivo, pág. X]).
+2. Se a informação não estiver no contexto, responda honestamente que não sabe.
+3. Não use conhecimento externo. Use apenas o que foi fornecido.
+4. Mantenha um tom profissional e direto.
 
-CONTEXTO RECUPERADO:
+CONTEXTO:
 {context}
 
-PERGUNTA DO USUÁRIO: {question}
+PERGUNTA: {question}
 
-RESPOSTA:"""
-        
-        try:
-            # Use ollama with low temperature for more factual answers
+RESPOSTA (Em Português):"""
+            
             response = ollama.generate(
                 model=model, 
                 prompt=prompt,
-                options={
-                    "temperature": 0.2, # Lower temperature = less creative, more factual
-                }
+                options={"temperature": 0, "num_ctx": 4096} # Temp 0 para maior fidelidade
             )
             
             return {
                 "answer": response['response'],
-                "sources": sources
+                "sources": list(set(sources_with_pages))
             }
         except Exception as e:
+            logger.error(f"Error in RAG query: {e}")
             return {
-                "answer": f"Erro ao consultar o modelo {model}: {str(e)}",
+                "answer": f"Erro técnico: {str(e)}",
                 "sources": []
             }
+
+rag_manager = RAGManager()
 
 rag_manager = RAGManager()

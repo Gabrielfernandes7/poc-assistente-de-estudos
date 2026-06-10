@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
 import { 
   Upload, Send, FileText, BookOpen, Loader2, Moon, Sun, 
-  Trash2, Plus, ChevronRight, Settings, BrainCircuit, X
+  Trash2, Plus, Settings, BrainCircuit, X, MessageSquareX
 } from 'lucide-react';
 
 interface Notebook {
@@ -10,6 +10,7 @@ interface Notebook {
   name: string;
   created_at: string;
   last_model: string;
+  history?: Message[];
 }
 
 interface Message {
@@ -19,17 +20,18 @@ interface Message {
 }
 
 const API_BASE_URL = 'http://localhost:8000';
-const AVAILABLE_MODELS = ['llama3.2:1b', 'llama3.2:3b', 'qwen2.5:1.5b', 'mistral'];
 
 function App() {
   const [notebooks, setNotebooks] = useState<Notebook[]>([]);
   const [activeNotebook, setActiveNotebook] = useState<Notebook | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
-  const [selectedModel, setSelectedModel] = useState('llama3.2:1b');
+  const [selectedModel, setSelectedModel] = useState('');
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const [isQuerying, setIsQuerying] = useState(false);
   const [uploadedFiles, setUploadedFiles] = useState<string[]>([]);
+  const [filesStatus, setFilesStatus] = useState<Record<string, string>>({});
   const [isDarkMode, setIsDarkMode] = useState(() => localStorage.getItem('study_theme') === 'dark');
   const [showNewNotebookModal, setShowNewNotebookModal] = useState(false);
   const [newNotebookName, setNewNotebookName] = useState('');
@@ -46,16 +48,34 @@ function App() {
   // Initial Data
   useEffect(() => {
     fetchNotebooks();
+    fetchModels();
   }, []);
+
+  // Polling for file status
+  useEffect(() => {
+    let interval: any;
+    if (activeNotebook && uploadedFiles.length > 0) {
+      fetchFilesStatus(activeNotebook.id);
+      interval = setInterval(() => fetchFilesStatus(activeNotebook.id), 3000);
+    }
+    return () => clearInterval(interval);
+  }, [activeNotebook, uploadedFiles]);
 
   // Sync Messages and Files when active notebook changes
   useEffect(() => {
     if (activeNotebook) {
       fetchNotebookData(activeNotebook.id);
-      setSelectedModel(activeNotebook.last_model || 'llama3.2:1b');
-      setMessages([]); // Reset messages for now (history is not per notebook yet in backend, but will be contextually isolated by vectors)
+      if (activeNotebook.last_model && availableModels.includes(activeNotebook.last_model)) {
+        setSelectedModel(activeNotebook.last_model);
+      } else if (availableModels.length > 0) {
+        setSelectedModel(availableModels[0]);
+      }
+      setMessages(activeNotebook.history || []);
+    } else {
+      setMessages([]);
+      setUploadedFiles([]);
     }
-  }, [activeNotebook]);
+  }, [activeNotebook, availableModels]);
 
   // Scroll to bottom
   useEffect(() => {
@@ -63,6 +83,19 @@ function App() {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages, isQuerying]);
+
+  const fetchModels = async () => {
+    try {
+      const res = await axios.get(`${API_BASE_URL}/models`);
+      setAvailableModels(res.data);
+      if (res.data.length > 0) {
+        setSelectedModel(res.data[0]);
+      }
+    } catch (error) {
+      console.error('Failed to fetch models:', error);
+      setAvailableModels(['llama3.2:1b']); // Fallback
+    }
+  };
 
   const fetchNotebooks = async () => {
     try {
@@ -76,10 +109,20 @@ function App() {
     }
   };
 
+  const fetchFilesStatus = async (id: string) => {
+    try {
+      const res = await axios.get(`${API_BASE_URL}/notebooks/${id}/files/status`);
+      setFilesStatus(res.data);
+    } catch (error) {
+      console.error('Failed to fetch files status:', error);
+    }
+  };
+
   const fetchNotebookData = async (id: string) => {
     try {
       const res = await axios.get(`${API_BASE_URL}/notebooks/${id}/files`);
       setUploadedFiles(res.data.files);
+      fetchFilesStatus(id);
     } catch (error) {
       console.error('Failed to fetch notebook data:', error);
     }
@@ -113,6 +156,19 @@ function App() {
     }
   };
 
+  const clearNotebookHistory = async () => {
+    if (!activeNotebook) return;
+    if (!window.confirm('Limpar o histórico de conversas deste notebook?')) return;
+    try {
+      await axios.delete(`${API_BASE_URL}/notebooks/${activeNotebook.id}/history`);
+      setMessages([]);
+      // Update local state for the notebook
+      setNotebooks(prev => prev.map(n => n.id === activeNotebook.id ? { ...n, history: [] } : n));
+    } catch (error) {
+      console.error('Failed to clear history:', error);
+    }
+  };
+
   const handleUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     if (!activeNotebook) return;
     const file = event.target.files?.[0];
@@ -127,7 +183,7 @@ function App() {
       fetchNotebookData(activeNotebook.id);
     } catch (error) {
       console.error('Upload failed:', error);
-      alert('Upload falhou. Verifique se o backend está rodando.');
+      alert('Upload falhou. Verifique o console para mais detalhes.');
     } finally {
       setIsUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -160,16 +216,29 @@ function App() {
         question: userMsg,
         model: selectedModel
       });
-      setMessages(prev => [...prev, {
+      
+      const assistantMsg: Message = {
         role: 'assistant',
         content: response.data.answer,
         sources: response.data.sources
-      }]);
+      };
+      
+      setMessages(prev => [...prev, assistantMsg]);
+      
+      // Update notebook history in global state
+      setNotebooks(prev => prev.map(n => {
+        if (n.id === activeNotebook.id) {
+          const newHistory = [...(n.history || []), { role: 'user', content: userMsg } as Message, assistantMsg];
+          return { ...n, history: newHistory };
+        }
+        return n;
+      }));
+      
     } catch (error) {
       console.error('Query failed:', error);
       setMessages(prev => [...prev, { 
         role: 'assistant', 
-        content: 'Erro ao processar sua pergunta. Verifique se o Ollama está rodando e o modelo baixado.' 
+        content: 'Ocorreu um erro na comunicação com o cérebro da IA. Verifique o Ollama.' 
       }]);
     } finally {
       setIsQuerying(false);
@@ -245,6 +314,15 @@ function App() {
             </div>
             
             <div className="flex items-center gap-3">
+              {activeNotebook && messages.length > 0 && (
+                <button 
+                  onClick={clearNotebookHistory}
+                  className={`p-2 rounded-lg text-red-500 hover:bg-red-500/10 transition-all`}
+                  title="Limpar Histórico"
+                >
+                  <MessageSquareX size={20} />
+                </button>
+              )}
               <select 
                 value={selectedModel}
                 onChange={(e) => setSelectedModel(e.target.value)}
@@ -252,7 +330,7 @@ function App() {
                   isDarkMode ? 'border-slate-700 hover:border-blue-500' : 'border-slate-300 hover:border-blue-400'
                 }`}
               >
-                {AVAILABLE_MODELS.map(m => <option key={m} value={m} className={isDarkMode ? 'bg-slate-800' : 'bg-white'}>{m}</option>)}
+                {availableModels.map(m => <option key={m} value={m} className={isDarkMode ? 'bg-slate-800' : 'bg-white'}>{m}</option>)}
               </select>
             </div>
           </header>
@@ -271,7 +349,7 @@ function App() {
                 <div className="text-center py-32 space-y-6">
                   <h2 className="text-3xl font-black tracking-tight">O que vamos aprender hoje?</h2>
                   <p className={`text-lg max-w-lg mx-auto ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>
-                    Pergunte qualquer coisa sobre as referências que você adicionou ao notebook <strong>{activeNotebook.name}</strong>.
+                    Pergunte qualquer coisa sobre as referências do notebook <strong>{activeNotebook.name}</strong>.
                   </p>
                 </div>
               )}
@@ -283,7 +361,7 @@ function App() {
                     ? 'bg-blue-600 text-white font-medium' 
                     : isDarkMode ? 'bg-slate-800 border border-slate-700' : 'bg-white border border-slate-200'
                   }`}>
-                    {msg.content}
+                    <div className="whitespace-pre-wrap">{msg.content}</div>
                     {msg.sources && msg.sources.length > 0 && (
                       <div className={`mt-4 pt-3 border-t flex flex-wrap gap-2 ${isDarkMode ? 'border-slate-700' : 'border-slate-100'}`}>
                         {msg.sources.map((s, i) => (
@@ -364,16 +442,46 @@ function App() {
             {/* File List */}
             <div className="space-y-3">
               {uploadedFiles.map((file, idx) => (
-                <div key={idx} className={`group flex items-center justify-between p-3 rounded-xl border ${
+                <div key={idx} className={`group flex flex-col p-3 rounded-xl border transition-all ${
                   isDarkMode ? 'bg-slate-800/40 border-slate-700' : 'bg-white border-slate-200 shadow-sm'
                 }`}>
-                  <div className="flex items-center gap-3 overflow-hidden">
-                    <FileText className="text-blue-500 flex-shrink-0" size={16} />
-                    <span className="text-xs font-semibold truncate">{file}</span>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3 overflow-hidden">
+                      <FileText className="text-blue-500 flex-shrink-0" size={16} />
+                      <span className="text-xs font-semibold truncate">{file}</span>
+                    </div>
+                    <button onClick={() => deleteFile(file)} className="p-1 text-red-500 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <Trash2 size={14} />
+                    </button>
                   </div>
-                  <button onClick={() => deleteFile(file)} className="p-1 text-red-500 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <Trash2 size={14} />
-                  </button>
+                  
+                  {/* Status Indicator */}
+                  <div className="mt-2 flex items-center gap-1.5">
+                    {filesStatus[file] === 'processing' && (
+                      <>
+                        <Loader2 size={10} className="animate-spin text-blue-500" />
+                        <span className="text-[9px] font-bold uppercase text-blue-500 tracking-wider">Processando</span>
+                      </>
+                    )}
+                    {filesStatus[file] === 'ready' && (
+                      <>
+                        <div className="w-1.5 h-1.5 rounded-full bg-green-500" />
+                        <span className="text-[9px] font-bold uppercase text-green-600 dark:text-green-400 tracking-wider">Pronto</span>
+                      </>
+                    )}
+                    {filesStatus[file] === 'error' && (
+                      <>
+                        <div className="w-1.5 h-1.5 rounded-full bg-red-500" />
+                        <span className="text-[9px] font-bold uppercase text-red-500 tracking-wider">Erro na Indexação</span>
+                      </>
+                    )}
+                    {!filesStatus[file] && (
+                      <>
+                        <div className="w-1.5 h-1.5 rounded-full bg-slate-400" />
+                        <span className="text-[9px] font-bold uppercase text-slate-400 tracking-wider">Aguardando</span>
+                      </>
+                    )}
+                  </div>
                 </div>
               ))}
               {activeNotebook && uploadedFiles.length === 0 && (
